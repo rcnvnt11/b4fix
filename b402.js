@@ -5,15 +5,12 @@ const { Worker } = require("worker_threads");
 
 /* ===============================================
    b402.js FINAL — Batch Full 500 → Check Result
+   Tidak exit sampai semua 500 selesai
    Success >=1 → exit 777 (ganti wallet)
    Success = 0 → exit 0  (retry batch)
    JWT INVALID → throw error (jwt_auto ambil baru)
-   +++ Tambahan: LOG WALLET & INDEX setiap batch
 ================================================ */
 let AUTO_JWT = null;
-let WALLET_INDEX = process.env.WALLET_INDEX || null;
-
-if (process.argv[3]) WALLET_INDEX = process.argv[3];
 if (process.argv[2]) {
     AUTO_JWT = process.argv[2];
     process.env.JWT = process.argv[2];
@@ -37,14 +34,6 @@ async function start() {
     const RECIPIENT = wallet.address;
     const jwt = AUTO_JWT;
 
-    /* ================================
-       LOG WALLET SETIAP BATCH DIMULAI
-    ================================= */
-    console.log("\n=======================================");
-    console.log(`🔐 WALLET #${WALLET_INDEX || "?"} → ${WALLET}`);
-    console.log(`🔑 JWT USED: ${jwt ? jwt.substring(0, 45) + "…" : "null"}`);
-    console.log("=======================================\n");
-
     /* APPROVE */
     async function approveUnlimited() {
         const abi = ["function approve(address spender, uint256 value)"];
@@ -66,9 +55,13 @@ async function start() {
             { recipientAddress: RECIPIENT },
             { headers: { Authorization: `Bearer ${jwt}` } }
         );
+
+        // Jika sukses 200 TANPA 402 → biasanya free mint habis
         throw new Error("FREE_MINT_HABIS");
+
     } catch (err) {
         if (err.response?.status === 402) {
+            // NORMAL VALID JWT
             pay = err.response.data.paymentRequirements;
         } else if (err.response?.status === 401 || err.response?.status === 403) {
             throw new Error("JWT_INVALID");
@@ -120,9 +113,10 @@ async function start() {
         })
     );
 
-    const WORKERS = 50;
+    const WORKERS = 50; // fixed
     let nextTask = 0;
     let finished = 0;
+
     let successCount = 0;
 
     function spawnWorker() {
@@ -189,4 +183,3 @@ async function start() {
 }
 
 start();
-
