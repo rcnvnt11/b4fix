@@ -2,43 +2,30 @@ require('dotenv').config();
 const axios = require('axios');
 const { ethers } = require('ethers');
 const { Worker } = require("worker_threads");
-const prompt = require("prompt-sync")();
 
-/* ============================================
-   AUTO RECEIVE JWT FROM jwt_auto.js
-============================================ */
+/* ===============================================
+   b402.js FINAL — Batch Full 500 → Check Result
+   Success >=1 → exit 777 (ganti wallet)
+   Success = 0 → exit 0  (retry batch)
+   JWT INVALID → throw error (jwt_auto ambil baru)
+   +++ Tambahan: LOG WALLET & INDEX setiap batch
+================================================ */
 let AUTO_JWT = null;
+let WALLET_INDEX = process.env.WALLET_INDEX || null;
+
+if (process.argv[3]) WALLET_INDEX = process.argv[3];
 if (process.argv[2]) {
     AUTO_JWT = process.argv[2];
     process.env.JWT = process.argv[2];
 }
 
-/* ------------ MAIN WRAPPER FOR RESTART ------------ */
 async function start() {
 
-    console.log("\n=== B402 SPAM MINT ===");
-    console.log("JWT manual mode aktif (menu 2 only)\n");
-
-    /* ============================================
-       JWT INPUT (AUTO FROM jwt_auto.js OR MANUAL)
-    ============================================= */
-    let JWT_INPUT = AUTO_JWT;
-    if (!JWT_INPUT) {
-        JWT_INPUT = prompt("Paste JWT here: ").trim();
-    }
-    if (!JWT_INPUT) {
-        console.log("❌ ERROR: JWT empty");
-        return start();
-    }
-
-    /* ------------ ORIGINAL CONFIG (TIDAK DIUBAH) ------------ */
     const {
         PRIVATE_KEY,
-        JWT,
         MINT_COUNT,
-        WORKER_COUNT,
         APPROVE,
-        RPC = "",
+        RPC = "https://rpc.ankr.com/bsc/b107dc2c0b183923e678913e18e080df0f7ba76f6a1b7c7dc70bcddc7718cc97",
         API_BASE = "https://www.b402.ai/api/api/v1",
         RELAYER = "0xE1Af7DaEa624bA3B5073f24A6Ea5531434D82d88",
         TOKEN = "0x55d398326f99059fF775485246999027B3197955",
@@ -48,20 +35,51 @@ async function start() {
     const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
     const WALLET = wallet.address;
     const RECIPIENT = wallet.address;
+    const jwt = AUTO_JWT;
 
-    /* ------------ APPROVE FUNCTION (ORI) ------------ */
+    /* ================================
+       LOG WALLET SETIAP BATCH DIMULAI
+    ================================= */
+    console.log("\n=======================================");
+    console.log(`🔐 WALLET #${WALLET_INDEX || "?"} → ${WALLET}`);
+    console.log(`🔑 JWT USED: ${jwt ? jwt.substring(0, 45) + "…" : "null"}`);
+    console.log("=======================================\n");
+
+    /* APPROVE */
     async function approveUnlimited() {
         const abi = ["function approve(address spender, uint256 value)"];
         const token = new ethers.Contract(TOKEN, abi, wallet);
         const Max = ethers.MaxUint256;
-        console.log("--- Approving unlimited USDT for relayer...");
         const tx = await token.approve(RELAYER, Max);
-        console.log("--- Approve TX:", tx.hash);
         await tx.wait();
-        console.log("--- Unlimited USDT approved!");
     }
 
-    /* ------------ BUILD PERMIT (ORI) ------------ */
+    if (!APPROVE) {
+        await approveUnlimited();
+    }
+
+    /* VALIDATE JWT properly */
+    let pay;
+    try {
+        await axios.post(
+            `${API_BASE}/faucet/drip`,
+            { recipientAddress: RECIPIENT },
+            { headers: { Authorization: `Bearer ${jwt}` } }
+        );
+        throw new Error("FREE_MINT_HABIS");
+    } catch (err) {
+        if (err.response?.status === 402) {
+            pay = err.response.data.paymentRequirements;
+        } else if (err.response?.status === 401 || err.response?.status === 403) {
+            throw new Error("JWT_INVALID");
+        } else {
+            console.log("⚠️ Unexpected error:", err.response?.data || err);
+            throw new Error("JWT_INVALID");
+        }
+    }
+
+    const M = Number(MINT_COUNT);
+
     async function buildPermit(amount, relayer) {
         const net = await provider.getNetwork();
         const now = Math.floor(Date.now() / 1000);
@@ -95,54 +113,62 @@ async function start() {
         return { authorization: msg, signature: sig };
     }
 
-    /* ------------ MAIN EXECUTION (ORI) ------------ */
-    console.log("B402 - WORKERS - SPAM - OTW 🚀");
-    const jwt = JWT_INPUT;
-
-    if (!APPROVE) {
-        await approveUnlimited();
-    }
-
-    console.log("--- Fetching JWT ...");
-    let pay;
-    try {
-        await axios.post(
-            `${API_BASE}/faucet/drip`,
-            { recipientAddress: RECIPIENT },
-            { headers: { Authorization: `Bearer ${jwt}` } }
-        );
-    } catch (err) {
-        if (err.response?.status === 402) {
-            pay = err.response.data.paymentRequirements;
-            console.log("--- JWT VALID");
-        } else {
-            throw new Error("--- JWT Invalid");
-        }
-    }
-
-    const MINT = Number(MINT_COUNT);
-    console.log(`--- Building ${MINT} permits in parallel...`);
-
+    console.log(`🔧 Build ${M} permits...`);
     const permits = await Promise.all(
-        [...Array(MINT)].map(async () => {
-            const p = await buildPermit(pay.amount, pay.relayerContract);
-            return p;
+        [...Array(M)].map(async () => {
+            return await buildPermit(pay.amount, pay.relayerContract);
         })
     );
 
-    console.log(`✔ Permit Success`);
-    console.log(`\n[Spam ${WORKER_COUNT} workers]`);
-
+    const WORKERS = 50;
     let nextTask = 0;
     let finished = 0;
-    const workers = [];
+    let successCount = 0;
 
-    function assignJob(worker) {
-        if (nextTask >= MINT) return;
+    function spawnWorker() {
+        const worker = new Worker("./helper-workers.js");
+
+        worker.on("message", (res) => {
+            finished++;
+
+            if (res.success) {
+                successCount++;
+                console.log(`🟩 SUCCESS #${res.index}`);
+            } else {
+                console.log(`🟥 FAIL #${res.index}`);
+            }
+
+            if (finished === M) {
+                console.log(`\n📌 Batch selesai (${finished}/${M})`);
+                console.log(`📊 Success count: ${successCount}`);
+
+                if (successCount > 0) {
+                    console.log("🎉 Ada success → exit 777 (ganti wallet)");
+                    process.exit(777);
+                } else {
+                    console.log("🔁 Tidak ada success → exit 0 (retry batch)");
+                    process.exit(0);
+                }
+                return;
+            }
+
+            assign(worker);
+        });
+
+        worker.on("error", () => {
+            console.log("⚠️ Worker crash → respawn ulang");
+            spawnWorker();
+        });
+
+        return worker;
+    }
+
+    function assign(worker) {
+        if (nextTask >= M) return;
         const p = permits[nextTask];
-        const jobIndex = nextTask;
+
         worker.postMessage({
-            index: jobIndex + 1,
+            index: nextTask + 1,
             jwt,
             API_BASE,
             RECIPIENT,
@@ -150,33 +176,17 @@ async function start() {
             p,
             pay,
         });
+
         nextTask++;
     }
 
-    for (let i = 0; i < WORKER_COUNT; i++) {
-        const worker = new Worker("./helper-workers.js");
-        workers.push(worker);
+    console.log(`🚀 Running with ${WORKERS} workers...`);
 
-        worker.on("message", (res) => {
-            finished++;
-
-            if (res.success) {
-                console.log(`🟩 Mint #${res.index} SUCCESS → ${res.tx}`);
-                process.exit(777); // <-- SIGNAL TO jwt_auto.js
-            } else {
-                console.log(`🟥 Mint #${res.index} FAILED → ${JSON.stringify(res.error)}`);
-            }
-
-            if (finished === MINT) {
-                console.log("\n📌 Semua mint selesai (gagal semua)");
-                process.exit(0);
-            }
-
-            assignJob(worker);
-        });
-
-        assignJob(worker);
+    for (let i = 0; i < WORKERS; i++) {
+        const w = spawnWorker();
+        assign(w);
     }
 }
 
 start();
+
