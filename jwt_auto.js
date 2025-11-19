@@ -12,9 +12,11 @@ const PAGE_URL = "https://www.b402.ai/experience-b402";
 const CHALLENGE_URL = "https://www.b402.ai/api/api/v1/auth/web3/challenge";
 const VERIFY_URL    = "https://www.b402.ai/api/api/v1/auth/web3/verify";
 
+let LAST_JWT = null;
+
 /* === Turnstile Solver === */
 async function solveTurnstile() {
-    console.log("🤖 Solving Turnstile via 2captcha...");
+    console.log("🤖 Solving Turnstile...");
     const create = `http://2captcha.com/in.php?key=${CAPTCHA_API_KEY}&method=turnstile&sitekey=${SITE_KEY}&pageurl=${PAGE_URL}`;
     const req = await axios.get(create);
     if (!req.data.includes("OK|")) return null;
@@ -38,7 +40,10 @@ async function solveTurnstile() {
 async function getJWT(wallet, pk) {
     console.log(`\n🔐 LOGIN WALLET: ${wallet}`);
     const captcha = await solveTurnstile();
-    if (!captcha) return null;
+    if (!captcha) {
+        console.log("❌ Captcha gagal");
+        return null;
+    }
 
     const lid = crypto.randomUUID();
     const clientId = "b402-s7chg25x";
@@ -69,7 +74,7 @@ async function getJWT(wallet, pk) {
             clientId,
             lid
         });
-        console.log("🎉 JWT:", v.data.jwt.substring(0, 50), "…");
+        console.log("🎉 JWT baru:", v.data.jwt.substring(0, 60), "…");
         return v.data.jwt;
     } catch (e) {
         console.log("❌ Verify:", e.response?.data || e.message);
@@ -77,43 +82,92 @@ async function getJWT(wallet, pk) {
     }
 }
 
-/* === LOOP === */
-async function loop(pk) {
-    const wallet = new ethers.Wallet(pk).address;
+/* === RUN B402 === */
+async function runMint(jwt) {
     const b402Path = path.join(__dirname, "b402.js");
 
+    return await new Promise((resolve) => {
+        const run = spawn(process.execPath, [b402Path, jwt], {
+            stdio: "inherit",
+            shell: false
+        });
+
+        run.on("close", (code) => {
+            resolve({ code });
+        });
+    });
+}
+
+/* === MAIN LOOP PER WALLET === */
+async function loopWallet(pk) {
+    const wallet = new ethers.Wallet(pk).address;
+
+    console.log("\n=======================================");
+    console.log(" WALLET:", wallet);
+    console.log("=======================================\n");
+
     while (true) {
-        const jwt = await getJWT(wallet, pk);
-        if (!jwt) continue;
 
-        console.log("🚀 Running b402.js with JWT...");
+        // pakai JWT lama jika ada
+        let jwt = LAST_JWT;
 
-        const run = spawn(
-            process.execPath,
-            [b402Path, jwt],
-            { stdio: "inherit", shell: false }
-        );
-
-        const code = await new Promise(res => run.on("close", res));
-
-        if (code === 777) {
-            console.log("🎉🔥 NFT SUKSES MINT!!! 🔥🎉");
-            process.exit(0);
+        if (!jwt) {
+            console.log("🔄 JWT kosong → login dulu");
+            jwt = await getJWT(wallet, pk);
+            if (!jwt) continue;
+            LAST_JWT = jwt;
         }
 
-        console.log("⛔ Mint batch gagal → retry JWT...\n");
+        console.log("🚀 Jalankan b402.js pakai JWT yang tersimpan...");
+
+        const result = await runMint(jwt);
+
+        // Ada 1 mint success
+        if (result.code === 777) {
+            console.log("🎉 NFT SUKSES → pindah wallet berikutnya!");
+            return;
+        }
+
+        // Semua mint gagal tapi JWT VALID → retry
+        if (result.code === 0) {
+            console.log("🔁 Semua mint gagal, tetapi JWT valid → retry batch...");
+            continue;
+        }
+
+        // JWT invalid, ambil JWT baru
+        console.log("⚠️ JWT invalid → ambil captcha & JWT baru...");
+        const newJWT = await getJWT(wallet, pk);
+        if (!newJWT) continue;
+
+        LAST_JWT = newJWT;
     }
 }
 
-/* === MULTI PK === */
+/* === MULTI PRIVATE KEY MODE === */
 console.log("=== MULTI PRIVATE KEY MODE ===");
 let PKS = [];
+
 while (true) {
     let x = prompt("Private Key: ").trim();
     if (!x) break;
     PKS.push(x);
 }
-if (PKS.length === 0) process.exit(0);
 
-console.log("\n=== STARTING:", new ethers.Wallet(PKS[0]).address, "===\n");
-loop(PKS[0]);
+if (PKS.length === 0) {
+    console.log("Tidak ada PK, exit");
+    process.exit(0);
+}
+
+console.log("\n=== MULAI PROSES ===\n");
+
+(async () => {
+
+    for (let i = 0; i < PKS.length; i++) {
+        LAST_JWT = null; // reset JWT per wallet
+        await loopWallet(PKS[i]);
+    }
+
+    console.log("\n🎉 Semua wallet selesai mint!");
+    process.exit(0);
+
+})();
