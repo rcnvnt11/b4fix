@@ -1,0 +1,17 @@
+{
+  "name": "b402-auto-workers",
+  "version": "1.0.0",
+  "description": "Simple Node.js spam mint B402 with workers",
+  "main": "b402.js",
+  "scripts": {
+    "start": "node b402.js"
+  },
+  "dependencies": {
+    "axios": "^1.13.2",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.15.0",
+    "node-fetch": "^2.7.0",
+    "prompt-sync": "^4.2.0"
+  }
+}
